@@ -8,10 +8,12 @@ const createBtn = document.getElementById("createBtn");
 const joinBtn = document.getElementById("joinBtn");
 const startBtn = document.getElementById("startBtn");
 const resetBtn = document.getElementById("resetBtn");
+const saveRoundsBtn = document.getElementById("saveRoundsBtn");
+const roundsInput = document.getElementById("roundsInput");
 
 const roomCode = document.getElementById("roomCode");
 const phaseText = document.getElementById("phaseText");
-const timerText = document.getElementById("timerText");
+const roundText = document.getElementById("roundText");
 const statusBox = document.getElementById("status");
 const scoreboard = document.getElementById("scoreboard");
 const myTotal = document.getElementById("myTotal");
@@ -20,28 +22,33 @@ const lobbyScreen = document.getElementById("lobbyScreen");
 const rememberScreen = document.getElementById("rememberScreen");
 const guessScreen = document.getElementById("guessScreen");
 const resultsScreen = document.getElementById("resultsScreen");
+const finalScreen = document.getElementById("finalScreen");
 
-const rememberGrid = document.getElementById("rememberGrid");
-const colorTabs = document.getElementById("colorTabs");
-const previewBox = document.getElementById("previewBox");
-const hsbValues = document.getElementById("hsbValues");
+const rememberRoundLabel = document.getElementById("rememberRoundLabel");
+const rememberColor = document.getElementById("rememberColor");
+const rememberTimer = document.getElementById("rememberTimer");
 
-const hSlider = document.getElementById("hSlider");
-const sSlider = document.getElementById("sSlider");
-const bSlider = document.getElementById("bSlider");
-const hVal = document.getElementById("hVal");
-const sVal = document.getElementById("sVal");
-const bVal = document.getElementById("bVal");
-
+const guessRoundLabel = document.getElementById("guessRoundLabel");
+const hueBar = document.getElementById("hueBar");
+const hueHandle = document.getElementById("hueHandle");
+const sbArea = document.getElementById("sbArea");
+const sbHandle = document.getElementById("sbHandle");
+const previewPanel = document.getElementById("previewPanel");
+const pickerValues = document.getElementById("pickerValues");
+const guessMessage = document.getElementById("guessMessage");
 const submitBtn = document.getElementById("submitBtn");
-const myResults = document.getElementById("myResults");
+
+const resultsTarget = document.getElementById("resultsTarget");
+const resultsTimer = document.getElementById("resultsTimer");
+const resultsList = document.getElementById("resultsList");
+const finalTarget = document.getElementById("finalTarget");
+const finalResultsList = document.getElementById("finalResultsList");
 
 let state = {
   selfId: null,
   room: null,
-  currentIndex: 0,
-  timerInterval: null,
-  localGuesses: Array.from({ length: 5 }, () => ({ h: 180, s: 50, b: 50 }))
+  timers: [],
+  guess: { h: 280, s: 35, b: 55 }
 };
 
 function setStatus(text) {
@@ -57,8 +64,103 @@ function showRoom(show) {
   roomCard.classList.toggle("hidden", !show);
 }
 
+function clearAllTimers() {
+  state.timers.forEach((id) => clearInterval(id));
+  state.timers = [];
+}
+
 function hsbCss(h, s, b) {
-  return `hsl(${h} ${s}% ${Math.max(5, Math.min(95, b))}%)`;
+  return `hsl(${h} ${s}% ${b}%)`;
+}
+
+function syncPickerVisuals() {
+  const { h, s, b } = state.guess;
+
+  previewPanel.style.background = hsbCss(h, s, b);
+  sbArea.style.background = `
+    linear-gradient(to bottom, rgba(255,255,255,0.55), rgba(255,255,255,0)),
+    linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0)),
+    hsl(${h} 100% 50%)
+  `;
+
+  const hueY = (h / 359) * hueBar.clientHeight;
+  hueHandle.style.left = `${hueBar.clientWidth / 2}px`;
+  hueHandle.style.top = `${hueY}px`;
+
+  const sbX = (s / 100) * sbArea.clientWidth;
+  const sbY = ((100 - b) / 100) * sbArea.clientHeight;
+  sbHandle.style.left = `${sbX}px`;
+  sbHandle.style.top = `${sbY}px`;
+
+  pickerValues.textContent = `H${h} S${s} B${b}`;
+}
+
+function emitGuess() {
+  socket.emit("update_guess", { guess: state.guess }, () => {});
+}
+
+function setGuess(nextGuess) {
+  state.guess = {
+    h: Math.max(0, Math.min(359, Math.round(nextGuess.h))),
+    s: Math.max(0, Math.min(100, Math.round(nextGuess.s))),
+    b: Math.max(0, Math.min(100, Math.round(nextGuess.b)))
+  };
+  syncPickerVisuals();
+  emitGuess();
+}
+
+function attachHueEvents() {
+  function updateFromEvent(event) {
+    const rect = hueBar.getBoundingClientRect();
+    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+    const h = (y / rect.height) * 359;
+    setGuess({ ...state.guess, h });
+  }
+
+  hueBar.addEventListener("mousedown", (event) => {
+    updateFromEvent(event);
+
+    function onMove(e) {
+      updateFromEvent(e);
+    }
+
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
+}
+
+function attachSbEvents() {
+  function updateFromEvent(event) {
+    const rect = sbArea.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+
+    const s = (x / rect.width) * 100;
+    const b = 100 - (y / rect.height) * 100;
+
+    setGuess({ ...state.guess, s, b });
+  }
+
+  sbArea.addEventListener("mousedown", (event) => {
+    updateFromEvent(event);
+
+    function onMove(e) {
+      updateFromEvent(e);
+    }
+
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
 }
 
 function updateScreens() {
@@ -67,65 +169,8 @@ function updateScreens() {
   lobbyScreen.classList.toggle("hidden", phase !== "lobby");
   rememberScreen.classList.toggle("hidden", phase !== "remember");
   guessScreen.classList.toggle("hidden", phase !== "guess");
-  resultsScreen.classList.toggle("hidden", phase !== "results");
-}
-
-function renderRememberColors() {
-  if (!state.room?.colors) {
-    rememberGrid.innerHTML = "";
-    return;
-  }
-
-  rememberGrid.innerHTML = state.room.colors
-    .map((color) => `<div class="colorCard" style="background:${hsbCss(color.h, color.s, color.b)}"></div>`)
-    .join("");
-}
-
-function renderTabs() {
-  colorTabs.innerHTML = "";
-
-  for (let i = 0; i < 5; i += 1) {
-    const btn = document.createElement("button");
-    btn.className = `tabBtn ${state.currentIndex === i ? "active" : ""}`;
-    btn.textContent = `Color ${i + 1}`;
-    btn.addEventListener("click", () => {
-      state.currentIndex = i;
-      syncSlidersFromLocal();
-      renderTabs();
-    });
-    colorTabs.appendChild(btn);
-  }
-}
-
-function syncSlidersFromLocal() {
-  const guess = state.localGuesses[state.currentIndex];
-  hSlider.value = guess.h;
-  sSlider.value = guess.s;
-  bSlider.value = guess.b;
-
-  hVal.textContent = guess.h;
-  sVal.textContent = guess.s;
-  bVal.textContent = guess.b;
-
-  hsbValues.textContent = `H${guess.h} S${guess.s} B${guess.b}`;
-  previewBox.style.background = hsbCss(guess.h, guess.s, guess.b);
-}
-
-function sendGuess() {
-  const guess = state.localGuesses[state.currentIndex];
-  socket.emit("update_guess", { index: state.currentIndex, guess }, () => {});
-}
-
-function handleSliderChange() {
-  const guess = {
-    h: Number(hSlider.value),
-    s: Number(sSlider.value),
-    b: Number(bSlider.value)
-  };
-
-  state.localGuesses[state.currentIndex] = guess;
-  syncSlidersFromLocal();
-  sendGuess();
+  resultsScreen.classList.toggle("hidden", phase !== "round_results");
+  finalScreen.classList.toggle("hidden", phase !== "final_results");
 }
 
 function renderScoreboard() {
@@ -148,7 +193,7 @@ function renderScoreboard() {
       <div>${index + 1}</div>
       <div>${player.name}${player.connected ? "" : " (left)"}</div>
       <div>${Number(player.totalScore || 0).toFixed(2)}</div>
-      <div>${player.submitted ? "Submitted" : "Playing"}</div>
+      <div>${player.submitted ? "Submitted" : "Waiting"}</div>
     </div>
   `).join("");
 
@@ -158,65 +203,91 @@ function renderScoreboard() {
   myTotal.textContent = me ? Number(me.totalScore || 0).toFixed(2) : "0.00";
 }
 
-function renderResults() {
-  const results = state.room?.myResults || [];
-  if (!results.length) {
-    myResults.innerHTML = "<div class='muted'>No results yet.</div>";
+function renderResults(listEl, rows) {
+  const targetColor = state.room?.targetColor;
+
+  if (!rows || !targetColor) {
+    listEl.innerHTML = "<div class='muted'>No results.</div>";
     return;
   }
 
-  myResults.innerHTML = results.map((item, index) => `
-    <div class="resultItem">
-      <div>
-        <div class="muted">Original</div>
-        <div class="swatch" style="background:${hsbCss(item.original.h, item.original.s, item.original.b)}"></div>
-      </div>
-      <div>
-        <div class="muted">Your guess</div>
-        <div class="swatch" style="background:${hsbCss(item.guess.h, item.guess.s, item.guess.b)}"></div>
-      </div>
-      <div>
-        <div><strong>Color ${index + 1}</strong></div>
-        <div>Score: <strong>${Number(item.score).toFixed(2)}</strong> / 10</div>
-        <div class="muted">Original H${item.original.h} S${item.original.s} B${item.original.b}</div>
-        <div class="muted">Guess H${item.guess.h} S${item.guess.s} B${item.guess.b}</div>
-      </div>
+  listEl.innerHTML = `
+    <div class="resultRow header">
+      <div>#</div>
+      <div>Name</div>
+      <div>Guess</div>
+      <div>Original</div>
+      <div>Round</div>
+      <div>Total</div>
     </div>
-  `).join("");
+    ${rows.map((row, index) => `
+      <div class="resultRow">
+        <div>${index + 1}</div>
+        <div>${row.name}</div>
+        <div class="swatch" style="background:${row.guess ? hsbCss(row.guess.h, row.guess.s, row.guess.b) : "#444"}"></div>
+        <div class="swatch" style="background:${hsbCss(targetColor.h, targetColor.s, targetColor.b)}"></div>
+        <div>${row.roundScore != null ? Number(row.roundScore).toFixed(2) : "-"}</div>
+        <div>${Number(row.totalScore || 0).toFixed(2)}</div>
+      </div>
+    `).join("")}
+  `;
+}
+
+function startCountdown(el, endAt) {
+  function tick() {
+    const ms = Math.max(0, endAt - Date.now());
+    el.textContent = `${(ms / 1000).toFixed(1)}s`;
+    if (ms <= 0) clearInterval(id);
+  }
+
+  tick();
+  const id = setInterval(tick, 100);
+  state.timers.push(id);
 }
 
 function updateRoomInfo() {
   if (!state.room) return;
 
   roomCode.textContent = state.room.code;
-  phaseText.textContent = state.room.phase[0].toUpperCase() + state.room.phase.slice(1);
+  phaseText.textContent = state.room.phase.replaceAll("_", " ");
+  roundText.textContent = `${state.room.currentRound} / ${state.room.totalRounds}`;
+  roundsInput.value = state.room.totalRounds;
 
   const isHost = state.room.hostId === state.selfId;
-  startBtn.disabled = !isHost || state.room.phase === "remember" || state.room.phase === "guess";
+  saveRoundsBtn.disabled = !isHost || state.room.phase !== "lobby";
+  startBtn.disabled = !isHost || (state.room.phase !== "lobby" && state.room.phase !== "final_results");
   resetBtn.disabled = !isHost;
 
   updateScreens();
-  renderRememberColors();
   renderScoreboard();
-  renderResults();
-}
 
-function startRememberTimer(endsAt) {
-  clearInterval(state.timerInterval);
-
-  function tick() {
-    const ms = Math.max(0, endsAt - Date.now());
-    timerText.textContent = `${(ms / 1000).toFixed(1)}s`;
-    if (ms <= 0) clearInterval(state.timerInterval);
+  if (state.room.phase === "remember" && state.room.targetColor) {
+    rememberRoundLabel.textContent = `${state.room.currentRound}/${state.room.totalRounds}`;
+    rememberColor.style.background = hsbCss(
+      state.room.targetColor.h,
+      state.room.targetColor.s,
+      state.room.targetColor.b
+    );
   }
 
-  tick();
-  state.timerInterval = setInterval(tick, 100);
-}
+  if (state.room.phase === "guess") {
+    guessRoundLabel.textContent = `${state.room.currentRound}/${state.room.totalRounds}`;
+    guessMessage.textContent = "Adjust the color and submit.";
+  }
 
-function clearTimer() {
-  clearInterval(state.timerInterval);
-  timerText.textContent = "--.-s";
+  if ((state.room.phase === "round_results" || state.room.phase === "final_results") && state.room.targetColor) {
+    const color = hsbCss(state.room.targetColor.h, state.room.targetColor.s, state.room.targetColor.b);
+    resultsTarget.style.background = color;
+    finalTarget.style.background = color;
+  }
+
+  if (state.room.phase === "round_results") {
+    renderResults(resultsList, state.room.roundResults);
+  }
+
+  if (state.room.phase === "final_results") {
+    renderResults(finalResultsList, state.room.roundResults);
+  }
 }
 
 createBtn.addEventListener("click", () => {
@@ -227,11 +298,10 @@ createBtn.addEventListener("click", () => {
     }
     state.selfId = res.selfId;
     state.room = res.room;
-    state.localGuesses = Array.from({ length: 5 }, () => ({ h: 180, s: 50, b: 50 }));
+    state.guess = res.room.currentGuess || { h: 280, s: 35, b: 55 };
     showRoom(true);
     updateRoomInfo();
-    renderTabs();
-    syncSlidersFromLocal();
+    syncPickerVisuals();
     setStatus(`Room ${res.room.code} created.`);
   });
 });
@@ -244,12 +314,18 @@ joinBtn.addEventListener("click", () => {
     }
     state.selfId = res.selfId;
     state.room = res.room;
-    state.localGuesses = Array.from({ length: 5 }, () => ({ h: 180, s: 50, b: 50 }));
+    state.guess = res.room.currentGuess || { h: 280, s: 35, b: 55 };
     showRoom(true);
     updateRoomInfo();
-    renderTabs();
-    syncSlidersFromLocal();
+    syncPickerVisuals();
     setStatus(`Joined room ${res.room.code}.`);
+  });
+});
+
+saveRoundsBtn.addEventListener("click", () => {
+  socket.emit("set_rounds", { totalRounds: roundsInput.value }, (res) => {
+    if (!res?.ok) setStatus(res?.error || "Could not save rounds.");
+    else setStatus("Rounds updated.");
   });
 });
 
@@ -262,40 +338,45 @@ startBtn.addEventListener("click", () => {
 resetBtn.addEventListener("click", () => {
   socket.emit("back_to_lobby", {}, (res) => {
     if (!res?.ok) setStatus(res?.error || "Could not reset room.");
+    else setStatus("Back in lobby.");
   });
 });
 
 submitBtn.addEventListener("click", () => {
-  socket.emit("submit_answers", {}, (res) => {
-    if (!res?.ok) setStatus(res?.error || "Could not submit answers.");
-    else setStatus("Submitted. Waiting for others.");
+  socket.emit("submit_guess", {}, (res) => {
+    if (!res?.ok) setStatus(res?.error || "Could not submit guess.");
+    else {
+      guessMessage.textContent = "Submitted. Waiting for others.";
+      setStatus("Submitted. Waiting for others.");
+    }
   });
-});
-
-[hSlider, sSlider, bSlider].forEach((el) => {
-  el.addEventListener("input", handleSliderChange);
 });
 
 socket.on("room_state", (room) => {
   state.room = room;
+  state.guess = room.currentGuess || state.guess;
+
+  clearAllTimers();
   updateRoomInfo();
+  syncPickerVisuals();
 
   if (room.phase === "remember" && room.rememberEndsAt) {
-    startRememberTimer(room.rememberEndsAt);
-    setStatus("Memorize the colors.");
-  } else {
-    clearTimer();
-  }
-
-  if (room.phase === "guess") {
-    setStatus("Recreate the colors from memory.");
-  }
-
-  if (room.phase === "results") {
-    setStatus("Results are ready.");
+    startCountdown(rememberTimer, room.rememberEndsAt);
+    setStatus("Memorize the color.");
+  } else if (room.phase === "guess") {
+    setStatus("Match the color and submit.");
+  } else if (room.phase === "round_results" && room.roundResultsEndsAt) {
+    startCountdown(resultsTimer, room.roundResultsEndsAt);
+    setStatus("Round results.");
+  } else if (room.phase === "final_results") {
+    setStatus("Game finished.");
+  } else if (room.phase === "lobby") {
+    setStatus("Waiting in lobby.");
   }
 });
 
-renderTabs();
-syncSlidersFromLocal();
+attachHueEvents();
+attachSbEvents();
+window.addEventListener("resize", syncPickerVisuals);
+syncPickerVisuals();
 renderScoreboard();

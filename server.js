@@ -8,8 +8,12 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
-const REMEMBER_SECONDS = 12;
-const TOTAL_COLORS = 5;
+
+const DEFAULT_TOTAL_ROUNDS = 5;
+const MIN_ROUNDS = 1;
+const MAX_ROUNDS = 20;
+const REMEMBER_SECONDS = 4;
+const ROUND_RESULTS_SECONDS = 4;
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -17,14 +21,14 @@ const rooms = new Map();
 
 function makeRoomCode(length = 5) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
+  let out = "";
   for (let i = 0; i < length; i += 1) {
-    code += chars[Math.floor(Math.random() * chars.length)];
+    out += chars[Math.floor(Math.random() * chars.length)];
   }
-  return code;
+  return out;
 }
 
-function createRoomCode() {
+function uniqueRoomCode() {
   let code = makeRoomCode();
   while (rooms.has(code)) code = makeRoomCode();
   return code;
@@ -32,31 +36,33 @@ function createRoomCode() {
 
 function sanitizeName(name) {
   if (typeof name !== "string") return "Player";
-  const value = name.trim().slice(0, 16);
-  return value || "Player";
+  const trimmed = name.trim().slice(0, 16);
+  return trimmed || "Player";
 }
 
-function clamp(num, min, max) {
-  return Math.max(min, Math.min(max, num));
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
 }
 
 function randomColorHSB() {
   return {
     h: Math.floor(Math.random() * 360),
-    s: Math.floor(35 + Math.random() * 60),
-    b: Math.floor(35 + Math.random() * 60)
+    s: Math.floor(25 + Math.random() * 75),
+    b: Math.floor(25 + Math.random() * 75)
   };
 }
 
 function hsbToRgb(h, s, v) {
-  s /= 100;
-  v /= 100;
+  const sat = s / 100;
+  const val = v / 100;
 
-  const c = v * s;
+  const c = val * sat;
   const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = v - c;
+  const m = val - c;
 
-  let r1 = 0, g1 = 0, b1 = 0;
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
 
   if (h >= 0 && h < 60) [r1, g1, b1] = [c, x, 0];
   else if (h < 120) [r1, g1, b1] = [x, c, 0];
@@ -72,10 +78,10 @@ function hsbToRgb(h, s, v) {
   };
 }
 
-function rgbDistance(c1, c2) {
-  const dr = c1.r - c2.r;
-  const dg = c1.g - c2.g;
-  const db = c1.b - c2.b;
+function rgbDistance(a, b) {
+  const dr = a.r - b.r;
+  const dg = a.g - b.g;
+  const db = a.b - b.b;
   return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
@@ -93,126 +99,161 @@ function createPlayer(id, name) {
     id,
     name,
     connected: true,
-    guesses: Array.from({ length: TOTAL_COLORS }, () => ({ h: 180, s: 50, b: 50 })),
     submitted: false,
-    scores: Array.from({ length: TOTAL_COLORS }, () => 0),
+    currentGuess: { h: 280, s: 35, b: 55 },
     totalScore: 0,
-    currentIndex: 0
+    roundScores: [],
+    roundGuesses: []
   };
 }
 
-function publicPlayer(player) {
-  return {
-    id: player.id,
-    name: player.name,
-    connected: player.connected,
-    submitted: player.submitted,
-    totalScore: player.totalScore,
-    scores: player.scores,
-    currentIndex: player.currentIndex
-  };
+function getSortedPlayers(room) {
+  return Array.from(room.players.values())
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      connected: p.connected,
+      submitted: p.submitted,
+      totalScore: p.totalScore,
+      roundScores: p.roundScores
+    }))
+    .sort((a, b) => b.totalScore - a.totalScore);
 }
 
-function getRoomState(roomCode, forPlayerId = null) {
-  const room = rooms.get(roomCode);
-  if (!room) return null;
+function getRoundResults(room) {
+  return Array.from(room.players.values())
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      connected: p.connected,
+      submitted: p.submitted,
+      totalScore: p.totalScore,
+      guess: p.roundGuesses[room.currentRound - 1] || null,
+      roundScore: p.roundScores[room.currentRound - 1] ?? null
+    }))
+    .sort((a, b) => (b.roundScore ?? -1) - (a.roundScore ?? -1));
+}
 
-  const players = Array.from(room.players.values())
-    .map(publicPlayer)
-    .sort((a, b) => b.totalScore - a.totalScore || Number(a.submitted) - Number(b.submitted));
+function roomStateFor(room, playerId) {
+  const player = room.players.get(playerId);
 
   const state = {
     code: room.code,
     hostId: room.hostId,
     phase: room.phase,
+    totalRounds: room.totalRounds,
+    currentRound: room.currentRound,
     rememberEndsAt: room.rememberEndsAt,
-    colorCount: TOTAL_COLORS,
-    players
+    roundResultsEndsAt: room.roundResultsEndsAt,
+    players: getSortedPlayers(room),
+    currentGuess: player ? player.currentGuess : { h: 280, s: 35, b: 55 }
   };
 
   if (room.phase === "remember") {
-    state.colors = room.colors;
+    state.targetColor = room.currentColor;
   }
 
-  if (room.phase === "results" && forPlayerId) {
-    const me = room.players.get(forPlayerId);
-    if (me) {
-      state.myResults = room.colors.map((original, index) => ({
-        original,
-        guess: me.guesses[index],
-        score: me.scores[index]
-      }));
-    }
-    state.allResults = Array.from(room.players.values())
-      .map((player) => ({
-        id: player.id,
-        name: player.name,
-        totalScore: player.totalScore,
-        scores: player.scores,
-        submitted: player.submitted
-      }))
-      .sort((a, b) => b.totalScore - a.totalScore);
+  if (room.phase === "round_results" || room.phase === "final_results") {
+    state.targetColor = room.currentColor;
+    state.roundResults = getRoundResults(room);
   }
 
   return state;
 }
 
-function emitRoomState(roomCode) {
+function emitRoom(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return;
 
   for (const player of room.players.values()) {
-    io.to(player.id).emit("room_state", getRoomState(roomCode, player.id));
+    io.to(player.id).emit("room_state", roomStateFor(room, player.id));
   }
 }
 
-function startGame(roomCode) {
+function resetRoomToLobby(room) {
+  room.phase = "lobby";
+  room.currentRound = 0;
+  room.currentColor = null;
+  room.rememberEndsAt = null;
+  room.roundResultsEndsAt = null;
+
+  clearTimeout(room.rememberTimer);
+  clearTimeout(room.resultsTimer);
+  room.rememberTimer = null;
+  room.resultsTimer = null;
+
+  for (const player of room.players.values()) {
+    player.submitted = false;
+    player.currentGuess = { h: 280, s: 35, b: 55 };
+    player.totalScore = 0;
+    player.roundScores = [];
+    player.roundGuesses = [];
+  }
+}
+
+function startRound(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return;
 
   room.phase = "remember";
-  room.colors = Array.from({ length: TOTAL_COLORS }, randomColorHSB);
+  room.currentRound += 1;
+  room.currentColor = randomColorHSB();
   room.rememberEndsAt = Date.now() + REMEMBER_SECONDS * 1000;
+  room.roundResultsEndsAt = null;
 
   for (const player of room.players.values()) {
-    player.guesses = Array.from({ length: TOTAL_COLORS }, () => ({ h: 180, s: 50, b: 50 }));
     player.submitted = false;
-    player.scores = Array.from({ length: TOTAL_COLORS }, () => 0);
-    player.totalScore = 0;
-    player.currentIndex = 0;
+    player.currentGuess = { h: 280, s: 35, b: 55 };
   }
 
-  emitRoomState(roomCode);
+  emitRoom(roomCode);
 
   clearTimeout(room.rememberTimer);
   room.rememberTimer = setTimeout(() => {
-    const latestRoom = rooms.get(roomCode);
-    if (!latestRoom) return;
-    latestRoom.phase = "guess";
-    latestRoom.rememberEndsAt = null;
-    emitRoomState(roomCode);
+    const current = rooms.get(roomCode);
+    if (!current) return;
+    if (current.phase !== "remember") return;
+
+    current.phase = "guess";
+    current.rememberEndsAt = null;
+    emitRoom(roomCode);
   }, REMEMBER_SECONDS * 1000);
 }
 
-function finalizeIfAllSubmitted(roomCode) {
+function maybeFinishRound(roomCode) {
   const room = rooms.get(roomCode);
-  if (!room) return;
-  if (room.phase !== "guess") return;
+  if (!room || room.phase !== "guess") return;
 
   const connectedPlayers = Array.from(room.players.values()).filter((p) => p.connected);
-  if (connectedPlayers.length === 0) return;
+  if (!connectedPlayers.length) return;
 
   const allSubmitted = connectedPlayers.every((p) => p.submitted);
   if (!allSubmitted) return;
 
-  room.phase = "results";
-
   for (const player of room.players.values()) {
-    player.scores = room.colors.map((original, index) => scoreGuess(original, player.guesses[index]));
-    player.totalScore = Math.round(player.scores.reduce((a, b) => a + b, 0) * 100) / 100;
+    const guess = player.currentGuess;
+    const score = scoreGuess(room.currentColor, guess);
+
+    player.roundGuesses[room.currentRound - 1] = { ...guess };
+    player.roundScores[room.currentRound - 1] = score;
+    player.totalScore = Math.round((player.totalScore + score) * 100) / 100;
   }
 
-  emitRoomState(roomCode);
+  room.phase = room.currentRound >= room.totalRounds ? "final_results" : "round_results";
+  room.roundResultsEndsAt =
+    room.phase === "round_results" ? Date.now() + ROUND_RESULTS_SECONDS * 1000 : null;
+
+  emitRoom(roomCode);
+
+  if (room.phase === "round_results") {
+    clearTimeout(room.resultsTimer);
+    room.resultsTimer = setTimeout(() => {
+      const current = rooms.get(roomCode);
+      if (!current) return;
+      if (current.phase !== "round_results") return;
+      startRound(roomCode);
+    }, ROUND_RESULTS_SECONDS * 1000);
+  }
 }
 
 function cleanupRoom(roomCode) {
@@ -222,31 +263,37 @@ function cleanupRoom(roomCode) {
   const hasConnected = Array.from(room.players.values()).some((p) => p.connected);
   if (!hasConnected) {
     clearTimeout(room.rememberTimer);
+    clearTimeout(room.resultsTimer);
     rooms.delete(roomCode);
   }
 }
 
 io.on("connection", (socket) => {
   socket.on("create_room", ({ name }, callback) => {
-    const roomCode = createRoomCode();
+    const code = uniqueRoomCode();
+
     const room = {
-      code: roomCode,
+      code,
       hostId: socket.id,
       phase: "lobby",
+      totalRounds: DEFAULT_TOTAL_ROUNDS,
+      currentRound: 0,
+      currentColor: null,
       rememberEndsAt: null,
+      roundResultsEndsAt: null,
       rememberTimer: null,
-      colors: [],
+      resultsTimer: null,
       players: new Map()
     };
 
     room.players.set(socket.id, createPlayer(socket.id, sanitizeName(name)));
-    rooms.set(roomCode, room);
+    rooms.set(code, room);
 
-    socket.join(roomCode);
-    socket.data.roomCode = roomCode;
+    socket.join(code);
+    socket.data.roomCode = code;
 
-    callback?.({ ok: true, selfId: socket.id, room: getRoomState(roomCode, socket.id) });
-    emitRoomState(roomCode);
+    callback?.({ ok: true, selfId: socket.id, room: roomStateFor(room, socket.id) });
+    emitRoom(code);
   });
 
   socket.on("join_room", ({ name, roomCode }, callback) => {
@@ -262,8 +309,32 @@ io.on("connection", (socket) => {
     socket.join(code);
     socket.data.roomCode = code;
 
-    callback?.({ ok: true, selfId: socket.id, room: getRoomState(code, socket.id) });
-    emitRoomState(code);
+    callback?.({ ok: true, selfId: socket.id, room: roomStateFor(room, socket.id) });
+    emitRoom(code);
+  });
+
+  socket.on("set_rounds", ({ totalRounds }, callback) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      callback?.({ ok: false, error: "Room not found." });
+      return;
+    }
+
+    if (room.hostId !== socket.id) {
+      callback?.({ ok: false, error: "Only host can change rounds." });
+      return;
+    }
+
+    if (room.phase !== "lobby") {
+      callback?.({ ok: false, error: "Rounds can only be changed in lobby." });
+      return;
+    }
+
+    room.totalRounds = clamp(Math.floor(Number(totalRounds) || DEFAULT_TOTAL_ROUNDS), MIN_ROUNDS, MAX_ROUNDS);
+    emitRoom(roomCode);
+    callback?.({ ok: true });
   });
 
   socket.on("start_game", (_, callback) => {
@@ -280,47 +351,50 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (room.phase === "remember" || room.phase === "guess") {
-      callback?.({ ok: false, error: "Game already in progress." });
+    if (room.phase !== "lobby" && room.phase !== "final_results") {
+      callback?.({ ok: false, error: "Game already running." });
       return;
     }
 
-    startGame(roomCode);
+    if (room.phase === "final_results") {
+      resetRoomToLobby(room);
+    }
+
+    startRound(roomCode);
     callback?.({ ok: true });
   });
 
-  socket.on("update_guess", ({ index, guess }, callback) => {
+  socket.on("update_guess", ({ guess }, callback) => {
     const roomCode = socket.data.roomCode;
     const room = rooms.get(roomCode);
+
     if (!room || room.phase !== "guess") {
-      callback?.({ ok: false });
+      callback?.({ ok: false, error: "Not in guess phase." });
       return;
     }
 
     const player = room.players.get(socket.id);
     if (!player || player.submitted) {
-      callback?.({ ok: false });
+      callback?.({ ok: false, error: "Cannot update guess." });
       return;
     }
 
-    const safeIndex = clamp(Number(index), 0, TOTAL_COLORS - 1);
-    const safeGuess = {
+    player.currentGuess = {
       h: clamp(Math.floor(Number(guess?.h) || 0), 0, 359),
       s: clamp(Math.floor(Number(guess?.s) || 0), 0, 100),
       b: clamp(Math.floor(Number(guess?.b) || 0), 0, 100)
     };
 
-    player.guesses[safeIndex] = safeGuess;
-    player.currentIndex = safeIndex;
-    emitRoomState(roomCode);
+    emitRoom(roomCode);
     callback?.({ ok: true });
   });
 
-  socket.on("submit_answers", (_, callback) => {
+  socket.on("submit_guess", (_, callback) => {
     const roomCode = socket.data.roomCode;
     const room = rooms.get(roomCode);
+
     if (!room || room.phase !== "guess") {
-      callback?.({ ok: false, error: "Not in guessing phase." });
+      callback?.({ ok: false, error: "Not in guess phase." });
       return;
     }
 
@@ -331,8 +405,8 @@ io.on("connection", (socket) => {
     }
 
     player.submitted = true;
-    emitRoomState(roomCode);
-    finalizeIfAllSubmitted(roomCode);
+    emitRoom(roomCode);
+    maybeFinishRound(roomCode);
     callback?.({ ok: true });
   });
 
@@ -350,20 +424,8 @@ io.on("connection", (socket) => {
       return;
     }
 
-    clearTimeout(room.rememberTimer);
-    room.phase = "lobby";
-    room.rememberEndsAt = null;
-    room.colors = [];
-
-    for (const player of room.players.values()) {
-      player.guesses = Array.from({ length: TOTAL_COLORS }, () => ({ h: 180, s: 50, b: 50 }));
-      player.submitted = false;
-      player.scores = Array.from({ length: TOTAL_COLORS }, () => 0);
-      player.totalScore = 0;
-      player.currentIndex = 0;
-    }
-
-    emitRoomState(roomCode);
+    resetRoomToLobby(room);
+    emitRoom(roomCode);
     callback?.({ ok: true });
   });
 
@@ -384,7 +446,11 @@ io.on("connection", (socket) => {
       room.hostId = nextHost ? nextHost.id : null;
     }
 
-    emitRoomState(roomCode);
+    if (room.phase === "guess") {
+      maybeFinishRound(roomCode);
+    }
+
+    emitRoom(roomCode);
     cleanupRoom(roomCode);
   });
 });

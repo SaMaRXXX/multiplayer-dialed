@@ -1,14 +1,13 @@
 {
-  "name": "multiplayer-color-memory",
+  "name": "color-rooms",
   "version": "1.0.0",
-  "description": "Dialed-style multiplayer color memory game",
+  "description": "Multiplayer color memory game",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.7.5"
   }
 }
