@@ -1,7 +1,7 @@
 {
-  "name": "multiplayer-dialed",
+  "name": "multiplayer-color-memory",
   "version": "1.0.0",
-  "description": "Minimal multiplayer browser reaction game",
+  "description": "Dialed-style multiplayer color memory game",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
