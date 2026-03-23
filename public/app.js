@@ -1,4 +1,5 @@
 const socket = io();
+let guessEmitTimer = null;
 
 const homeCard = document.getElementById("homeCard");
 const roomCard = document.getElementById("roomCard");
@@ -56,7 +57,7 @@ function setStatus(text) {
 }
 
 function getName() {
-  return (nameInput.value || "").trim().slice(0, 16) || "Player";
+  return (nameInput.value || "").trim().slice(0, 16);
 }
 
 function showRoom(show) {
@@ -96,9 +97,11 @@ function syncPickerVisuals() {
 }
 
 function emitGuess() {
-  socket.emit("update_guess", { guess: state.guess }, () => {});
+  clearTimeout(guessEmitTimer);
+  guessEmitTimer = setTimeout(() => {
+    socket.emit("update_guess", { guess: state.guess }, () => {});
+  }, 20);
 }
-
 function setGuess(nextGuess) {
   state.guess = {
     h: Math.max(0, Math.min(359, Math.round(nextGuess.h))),
@@ -109,34 +112,50 @@ function setGuess(nextGuess) {
   emitGuess();
 }
 
+function bindPointerDrag(element, onUpdate) {
+  let dragging = false;
+
+  function handle(event) {
+    const rect = element.getBoundingClientRect();
+    onUpdate(event, rect);
+  }
+
+  element.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    element.setPointerCapture(event.pointerId);
+    handle(event);
+  });
+
+  element.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    handle(event);
+  });
+
+  element.addEventListener("pointerup", (event) => {
+    dragging = false;
+    if (element.hasPointerCapture(event.pointerId)) {
+      element.releasePointerCapture(event.pointerId);
+    }
+  });
+
+  element.addEventListener("pointercancel", (event) => {
+    dragging = false;
+    if (element.hasPointerCapture(event.pointerId)) {
+      element.releasePointerCapture(event.pointerId);
+    }
+  });
+}
+
 function attachHueEvents() {
-  function updateFromEvent(event) {
-    const rect = hueBar.getBoundingClientRect();
+  bindPointerDrag(hueBar, (event, rect) => {
     const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
     const h = (y / rect.height) * 359;
     setGuess({ ...state.guess, h });
-  }
-
-  hueBar.addEventListener("mousedown", (event) => {
-    updateFromEvent(event);
-
-    function onMove(e) {
-      updateFromEvent(e);
-    }
-
-    function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
   });
 }
 
 function attachSbEvents() {
-  function updateFromEvent(event) {
-    const rect = sbArea.getBoundingClientRect();
+  bindPointerDrag(sbArea, (event, rect) => {
     const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
     const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
 
@@ -144,25 +163,8 @@ function attachSbEvents() {
     const b = 100 - (y / rect.height) * 100;
 
     setGuess({ ...state.guess, s, b });
-  }
-
-  sbArea.addEventListener("mousedown", (event) => {
-    updateFromEvent(event);
-
-    function onMove(e) {
-      updateFromEvent(e);
-    }
-
-    function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    }
-
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
   });
 }
-
 function updateScreens() {
   const phase = state.room?.phase || "lobby";
 
@@ -307,7 +309,22 @@ createBtn.addEventListener("click", () => {
 });
 
 joinBtn.addEventListener("click", () => {
-  socket.emit("join_room", { name: getName(), roomCode: roomInput.value.trim().toUpperCase() }, (res) => {
+  const name = getName();
+  const code = roomInput.value.trim().toUpperCase();
+
+  if (!name) {
+    setStatus("Enter your name before joining a room.");
+    nameInput.focus();
+    return;
+  }
+
+  if (!code) {
+    setStatus("Enter a room code.");
+    roomInput.focus();
+    return;
+  }
+
+  socket.emit("join_room", { name, roomCode: code }, (res) => {
     if (!res.ok) {
       setStatus(res.error || "Could not join room.");
       return;

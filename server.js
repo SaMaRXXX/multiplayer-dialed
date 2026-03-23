@@ -44,11 +44,48 @@ function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-function randomColorHSB() {
-  return {
+function colorDistanceHSB(a, b) {
+  const hueDiffRaw = Math.abs(a.h - b.h);
+  const hueDiff = Math.min(hueDiffRaw, 360 - hueDiffRaw) / 180;
+  const satDiff = Math.abs(a.s - b.s) / 100;
+  const brightDiff = Math.abs(a.b - b.b) / 100;
+
+  return Math.sqrt(
+    hueDiff * hueDiff * 2.2 +
+    satDiff * satDiff * 0.8 +
+    brightDiff * brightDiff * 0.8
+  );
+}
+
+function randomColorHSB(previousColors = []) {
+  let best = null;
+  let bestScore = -1;
+
+  for (let i = 0; i < 30; i += 1) {
+    const candidate = {
+      h: Math.floor(Math.random() * 360),
+      s: Math.floor(35 + Math.random() * 60),
+      b: Math.floor(35 + Math.random() * 55)
+    };
+
+    if (!previousColors.length) {
+      return candidate;
+    }
+
+    const minDistance = Math.min(
+      ...previousColors.map((c) => colorDistanceHSB(candidate, c))
+    );
+
+    if (minDistance > bestScore) {
+      best = candidate;
+      bestScore = minDistance;
+    }
+  }
+
+  return best || {
     h: Math.floor(Math.random() * 360),
-    s: Math.floor(25 + Math.random() * 75),
-    b: Math.floor(25 + Math.random() * 75)
+    s: Math.floor(35 + Math.random() * 60),
+    b: Math.floor(35 + Math.random() * 55)
   };
 }
 
@@ -174,6 +211,7 @@ function resetRoomToLobby(room) {
   room.phase = "lobby";
   room.currentRound = 0;
   room.currentColor = null;
+  room.usedColors = [];
   room.rememberEndsAt = null;
   room.roundResultsEndsAt = null;
 
@@ -184,7 +222,11 @@ function resetRoomToLobby(room) {
 
   for (const player of room.players.values()) {
     player.submitted = false;
-    player.currentGuess = { h: 280, s: 35, b: 55 };
+    player.currentGuess = {
+     h: Math.floor(Math.random() * 360),
+     s: Math.floor(25 + Math.random() * 70),
+     b: Math.floor(25 + Math.random() * 70)
+    };
     player.totalScore = 0;
     player.roundScores = [];
     player.roundGuesses = [];
@@ -197,7 +239,8 @@ function startRound(roomCode) {
 
   room.phase = "remember";
   room.currentRound += 1;
-  room.currentColor = randomColorHSB();
+  room.currentColor = randomColorHSB(room.usedColors);
+  room.usedColors.push(room.currentColor);
   room.rememberEndsAt = Date.now() + REMEMBER_SECONDS * 1000;
   room.roundResultsEndsAt = null;
 
@@ -279,6 +322,7 @@ io.on("connection", (socket) => {
       totalRounds: DEFAULT_TOTAL_ROUNDS,
       currentRound: 0,
       currentColor: null,
+      usedColors: [],
       rememberEndsAt: null,
       roundResultsEndsAt: null,
       rememberTimer: null,
@@ -297,22 +341,32 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join_room", ({ name, roomCode }, callback) => {
-    const code = String(roomCode || "").trim().toUpperCase();
-    const room = rooms.get(code);
+  const code = String(roomCode || "").trim().toUpperCase();
+  const cleanName = String(name || "").trim().slice(0, 16);
+  const room = rooms.get(code);
 
-    if (!room) {
-      callback?.({ ok: false, error: "Room not found." });
-      return;
-    }
+  if (!code) {
+    callback?.({ ok: false, error: "Room code is required." });
+    return;
+  }
 
-    room.players.set(socket.id, createPlayer(socket.id, sanitizeName(name)));
-    socket.join(code);
-    socket.data.roomCode = code;
+  if (!cleanName) {
+    callback?.({ ok: false, error: "Name is required to join the room." });
+    return;
+  }
 
-    callback?.({ ok: true, selfId: socket.id, room: roomStateFor(room, socket.id) });
-    emitRoom(code);
-  });
+  if (!room) {
+    callback?.({ ok: false, error: "Room not found." });
+    return;
+  }
 
+  room.players.set(socket.id, createPlayer(socket.id, cleanName));
+  socket.join(code);
+  socket.data.roomCode = code;
+
+  callback?.({ ok: true, selfId: socket.id, room: roomStateFor(room, socket.id) });
+  emitRoom(code);
+});
   socket.on("set_rounds", ({ totalRounds }, callback) => {
     const roomCode = socket.data.roomCode;
     const room = rooms.get(roomCode);
